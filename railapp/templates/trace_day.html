@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% import "_trace.html" as trace %}
+{% block title %}{{ detail.day }} 日结追查{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>{{ detail.day }} 的日结追查</h1>
+  <p class="muted">
+    功能启用后该出票日的每次上传预览及其确认记录。
+    {% if detail.current_rev > 0 %}
+    当前已发布到 <strong>r{{ detail.current_rev }}</strong>：
+    <a href="{{ url_for('day_page', day=detail.day) }}">查看该日已发布修订 →</a>
+    {% else %}
+    该日尚未发布任何修订。
+    {% endif %}
+  </p>
+  {% if not detail.uploads and not detail.orphan_confirmations %}
+  <p class="empty">该日没有上传或确认记录。</p>
+  {% endif %}
+</section>
+
+{% for u in detail.uploads %}
+<section class="panel trace-upload" id="upload-{{ u.id }}">
+  <header class="trace-head">
+    <h2>{{ u.filename }}</h2>
+    {% if u.status == 'preview_ok' %}<span class="badge ok">{{ u.status_label }}</span>
+    {% elif u.status == 'preview_incompatible' %}<span class="badge warn">{{ u.status_label }}</span>
+    {% else %}<span class="badge bad">{{ u.status_label }}</span>{% endif %}
+  </header>
+  <p class="muted">
+    受理时间 <span class="mono">{{ u.received_at }}</span> · 大小 {{ u.size_bytes }} B
+    {% if u.preview_id %}
+    · 预览 <code>{{ u.preview_id[:12] }}…</code>
+      {% if u.preview_alive %}（预览仍在有效期内）{% else %}（预览已清理，记录保留）{% endif %}
+    {% endif %}
+  </p>
+
+  {% if u.status == 'batch_rejected' %}
+  <div class="alert danger">
+    <strong>原件格式问题：</strong>{{ u.detail.message }}
+  </div>
+  {% if u.detail.problem and u.detail.problem.rows %}
+  <div class="table-scroll">
+    <table class="grid compact">
+      <thead><tr><th>行号</th><th>原因</th></tr></thead>
+      <tbody>
+      {% for r in u.detail.problem.rows %}
+        <tr><td>{{ r.line or r.row }}</td><td>{{ r.reason }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% elif u.status == 'file_too_large' or u.status == 'invalid_day' or u.status == 'error' %}
+  <div class="alert danger"><strong>未产生预览：</strong>{{ u.detail.message }}</div>
+  {% endif %}
+
+  {% if u.status == 'preview_incompatible' and u.detail.downstreams %}
+    {% for name in downstream_order %}
+      {% set ds = u.detail.downstreams[name] %}
+      {% if ds.status != 'ok' %}
+      <div class="alert warn">
+        <strong>不兼容的下游：{{ downstreams[name].label }}</strong>
+        {% if ds.missing_columns %}
+        <div>源 CSV 缺少必需列：{% for col in ds.missing_columns %}<code>{{ col }}</code>{% endfor %}</div>
+        {% endif %}
+        {% if ds.bad_row_count %}
+        <div>{{ ds.bad_row_count }} 行存在类型错误{% if ds.issues_truncated %}（仅显示前 {{ ds.issues|length }} 条）{% endif %}：</div>
+        <div class="table-scroll">
+          <table class="grid compact">
+            <thead><tr><th>数据行</th><th>文件行号</th><th>列</th><th>值</th><th>原因</th></tr></thead>
+            <tbody>
+            {% for issue in ds.issues %}
+              <tr>
+                <td>{{ issue.row }}</td><td>{{ issue.line }}</td><td>{{ issue.column }}</td>
+                <td class="mono">{{ issue.value }}</td><td>{{ issue.reason }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+    {% endfor %}
+  {% endif %}
+
+  {% if u.preview %}
+  <p class="hint">
+    预览基于修订 r{{ u.preview.base_rev }} · 契约 结算 v{{ u.preview.contracts.settlement.version }}
+    / 客流 v{{ u.preview.contracts.ridership.version }} · {{ u.preview.original.row_count }} 行
+    · 有效期至 <span class="mono">{{ u.preview.expires_at }}</span>
+  </p>
+  {% endif %}
+
+  {% if u.confirmations %}
+  <h3>确认记录（{{ u.confirmations|length }}）</h3>
+  {{ trace.confirmation_rows(u.confirmations, detail.day) }}
+  {% else %}
+  <p class="hint">该上传没有确认记录。</p>
+  {% endif %}
+</section>
+{% endfor %}
+
+{% if detail.orphan_confirmations %}
+<section class="panel">
+  <h2>未关联上传记录的确认</h2>
+  <p class="muted">这些确认指向的预览没有对应的上传记录（例如功能启用前留下的预览）。</p>
+  {{ trace.confirmation_rows(detail.orphan_confirmations, detail.day) }}
+</section>
+{% endif %}
+{% endblock %}

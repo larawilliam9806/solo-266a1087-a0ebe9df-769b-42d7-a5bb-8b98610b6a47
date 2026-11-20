@@ -15,7 +15,7 @@ from flask import (
 )
 
 from . import convert, db, domain
-from .errors import AppError, NotFound, Unprocessable
+from .errors import AppError, NotFound
 from .publisher import Service
 from .storage import BlobStore, verify_publications
 
@@ -225,6 +225,14 @@ def create_app(config=None):
             abort(404)
         return render_template("day.html", detail=detail)
 
+    @app.get("/trace")
+    def trace_page():
+        return render_template("trace.html", summary=service.trace_days())
+
+    @app.get("/trace/<day>")
+    def trace_day_page(day):
+        return render_template("trace_day.html", detail=service.trace_day(day))
+
     # ------------------------------------------------------------------
     # API
     # ------------------------------------------------------------------
@@ -235,17 +243,9 @@ def create_app(config=None):
         if upload is None:
             raise AppError("请选择要上传的 CSV 文件", code="missing_file")
         raw = upload.read(convert.MAX_FILE_BYTES + 1)
-        if len(raw) > convert.MAX_FILE_BYTES:
-            raise AppError(
-                "文件超过 1 MB 上限", status=413, code="file_too_large"
-            )
-        if not raw:
-            raise Unprocessable(
-                "上传的 CSV 为空文件",
-                code="batch_rejected",
-                details={"kind": "empty_file", "message": "上传的 CSV 为空文件"},
-            )
         filename = upload.filename or "tickets.csv"
+        # Size / empty / format checks happen in the service so every
+        # rejected attempt is also recorded on the trace page.
         status, payload = service.preview(day, filename, raw)
         return jsonify(payload), status
 
@@ -270,6 +270,14 @@ def create_app(config=None):
     @app.get("/api/days/<day>")
     def api_day(day):
         return jsonify(service.day_detail(day))
+
+    @app.get("/api/trace/days")
+    def api_trace_days():
+        return jsonify(service.trace_days())
+
+    @app.get("/api/trace/<day>")
+    def api_trace_day(day):
+        return jsonify(service.trace_day(day))
 
     @app.get("/api/contracts")
     def api_contracts():

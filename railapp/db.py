@@ -60,8 +60,43 @@ CREATE TABLE IF NOT EXISTS previews (
     consumed_at            TEXT
 );
 
+-- Trace (追查) records.  These tables are audit trails: rows are never
+-- updated or deleted when a preview is cleaned up, a new revision is
+-- published, or the service restarts.
+CREATE TABLE IF NOT EXISTS uploads (
+    id            TEXT PRIMARY KEY,
+    day           TEXT,
+    filename      TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL,
+    received_at   TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    detail_json   TEXT NOT NULL,
+    preview_id    TEXT,
+    preview_json  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS confirmations (
+    id              TEXT PRIMARY KEY,
+    preview_id      TEXT NOT NULL,
+    upload_id       TEXT,
+    day             TEXT,
+    filename        TEXT,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    outcome         TEXT,  -- NULL = interrupted, 'published', 'failed'
+    failure_kind    TEXT,  -- 'preview_invalid' | 'file_error' | 'publish_failed'
+    failure_code    TEXT,
+    failure_message TEXT,
+    http_status     INTEGER,
+    published_rev   INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_publications_day ON publications(day, rev);
 CREATE INDEX IF NOT EXISTS idx_previews_expiry ON previews(expires_at);
+CREATE INDEX IF NOT EXISTS idx_uploads_day ON uploads(day, received_at);
+CREATE INDEX IF NOT EXISTS idx_uploads_preview ON uploads(preview_id);
+CREATE INDEX IF NOT EXISTS idx_confirmations_day ON confirmations(day, started_at);
+CREATE INDEX IF NOT EXISTS idx_confirmations_preview ON confirmations(preview_id);
 """
 
 PREVIEW_TTL_SECONDS = 2 * 60 * 60
@@ -246,3 +281,118 @@ def wait_for_write_lock(conn, attempts=200, delay=0.05):
         except sqlite3.OperationalError:
             time.sleep(delay)
     raise sqlite3.OperationalError("database is locked")
+
+
+# ----------------------------------------------------------------------
+# trace records (追查): upload attempts and confirmation attempts
+# ----------------------------------------------------------------------
+
+def create_upload(conn, *, upload_id, day, filename, size_bytes, received_at,
+                  status, detail, preview_id=None, preview=None):
+    conn.execute(
+        """INSERT INTO uploads (id, day, filename, size_bytes, received_at,
+                                status, detail_json, preview_id, preview_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            upload_id,
+            day,
+            filename,
+            size_bytes,
+            received_at,
+            status,
+            json.dumps(detail, ensure_ascii=False),
+            preview_id,
+            json.dumps(preview, ensure_ascii=False) if preview is not None else None,
+        ),
+    )
+
+
+def get_upload_by_preview(conn, preview_id):
+    row = conn.execute(
+        "SELECT * FROM uploads WHERE preview_id = ? ORDER BY rowid DESC LIMIT 1",
+        (preview_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def create_confirmation(conn, *, confirmation_id, preview_id, upload_id, day,
+                        filename, started_at):
+    conn.execute(
+        """INSERT INTO confirmations (id, preview_id, upload_id, day, filename,
+                                      started_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (confirmation_id, preview_id, upload_id, day, filename, started_at),
+    )
+
+
+def finish_confirmation(conn, confirmation_id, *, outcome, finished_at,
+                        failure_kind=None, failure_code=None,
+                        failure_message=None, http_status=None,
+                        published_rev=None):
+    conn.execute(
+        """UPDATE confirmations
+           SET outcome = ?, finished_at = ?, failure_kind = ?, failure_code = ?,
+               failure_message = ?, http_status = ?, published_rev = ?
+           WHERE id = ?""",
+        (
+            outcome,
+            finished_at,
+            failure_kind,
+            failure_code,
+            failure_message,
+            http_status,
+            published_rev,
+            confirmation_id,
+        ),
+    )
+
+
+def list_uploads_for_day(conn, day, limit=500):
+    rows = conn.execute(
+        "SELECT * FROM uploads WHERE day = ? ORDER BY received_at DESC, rowid DESC LIMIT ?",
+        (day, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_confirmations_for_day(conn, day, limit=1000):
+    rows = conn.execute(
+        "SELECT * FROM confirmations WHERE day = ? ORDER BY started_at DESC, rowid DESC LIMIT ?",
+        (day, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_confirmations_without_day(conn, limit=200):
+    rows = conn.execute(
+        "SELECT * FROM confirmations WHERE day IS NULL ORDER BY started_at DESC, rowid DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def trace_day_summary(conn):
+    """Per-day counts of uploads and confirmation outcomes for the trace index."""
+    upload_rows = conn.execute(
+        """SELECT COALESCE(day, '') AS day, COUNT(*) AS uploads,
+                  MAX(received_at) AS last_at
+           FROM uploads GROUP BY COALESCE(day, '')"""
+    ).fetchall()
+    confirmation_rows = conn.execute(
+        """SELECT COALESCE(day, '') AS day, COUNT(*) AS confirmations,
+                  SUM(CASE WHEN outcome = 'published' THEN 1 ELSE 0 END) AS published,
+                  SUM(CASE WHEN outcome = 'failed' THEN 1 ELSE 0 END) AS failed,
+                  SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) AS interrupted,
+                  MAX(started_at) AS last_at
+           FROM confirmations GROUP BY COALESCE(day, '')"""
+    ).fetchall()
+    return upload_rows, confirmation_rows
+
+
+def preview_exists(conn, preview_id):
+    if not preview_id:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM previews WHERE id = ?", (preview_id,)
+    ).fetchone()
+    return row is not None

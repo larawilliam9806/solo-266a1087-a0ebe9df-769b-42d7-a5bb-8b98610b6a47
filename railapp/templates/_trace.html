@@ -1,0 +1,38 @@
+{% macro outcome_badge(c) %}
+  {% if c.outcome == 'published' %}
+  <span class="badge ok">已发布 r{{ c.published_rev }}</span>
+  {% elif c.outcome == 'failed' %}
+  <span class="badge bad">失败 · {{ c.failure_kind_label }}</span>
+  {% else %}
+  <span class="badge warn">中断</span>
+  {% endif %}
+{% endmacro %}
+
+{% macro confirmation_rows(confirmations, day) %}
+<table class="grid">
+  <thead><tr><th>开始时间</th><th>结果</th><th>说明</th><th>完成时间</th></tr></thead>
+  <tbody>
+  {% for c in confirmations %}
+    {% set link_day = c.day or day %}
+    <tr id="confirm-{{ c.id }}">
+      <td class="mono">{{ c.started_at }}</td>
+      <td>{{ outcome_badge(c) }}</td>
+      <td>
+        {% if c.outcome == 'published' %}
+          发布为修订 r{{ c.published_rev }}。
+          {% if link_day %}
+          <a href="{{ url_for('day_page', day=link_day) }}#rev-{{ c.published_rev }}">查看该修订详情 →</a>
+          {% endif %}
+        {% elif c.outcome == 'failed' %}
+          <strong>{{ c.failure_kind_label }}</strong>：{{ c.failure_message }}
+          <span class="muted mono">[{{ c.failure_code }} · HTTP {{ c.http_status }}]</span>
+        {% else %}
+          确认未留下结果：既未登记发布，也未记录失败（可能确认中途服务重启，或仍在进行中）。
+        {% endif %}
+      </td>
+      <td class="mono">{{ c.finished_at or '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
